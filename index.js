@@ -44,19 +44,19 @@ async function createNewSTTStream(payload) {
 async function createNewFileStream(payload,audioDataStream) {
     log.info({ payload }, 'New Stream of audio from Asterisk to save to file');
 
-    let file = new FileConnector(payload.channelId, log);
+    let fileConnector = new FileConnector(payload.roomName, log);
 
     let map = connectorsMap.get(payload.channelId);
-    map.set('file', file);
+    map.set('file', fileConnector);
     connectorsMap.set(payload.channelId, map);
 
-    file.start(audioDataStream);
+    fileConnector.start(audioDataStream);
 }
 
 async function createNewWebSocketStream(payload,audioDataStream) {
     log.info({ payload }, 'New Stream of audio from Asterisk to send to WebSocket');
 
-    let websocketConnector = new WebSocketConnector(audioConfig, payload.channelId, log);
+    let websocketConnector = new WebSocketConnector(audioConfig, payload.roomName, log);
 
     let map = connectorsMap.get(payload.channelId);
     map.set('wss', websocketConnector);
