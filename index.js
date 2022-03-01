@@ -5,8 +5,10 @@ const Pino = require('pino');
 const GoogleCloudConnector = require('./lib/GoogleCloudConnector');
 const AzureSpeechConnector = require('./lib/AzureSpeechConnector');
 const AmazonTranscribeConnector = require('./lib/AmazonTranscribeConnector');
+const FileConnector = require('./lib/FileConnector');
+const WebSocketConnector = require('./lib/WebSocketConnector');
 const log = new Pino({
-    name: 'Dana-AudioServer',
+    name: 'Dana-AudioServer-CT',
 });
 
 let rtpServer = new RtpServer(config.get('rtpServer'), log);
@@ -31,6 +33,36 @@ async function createNewSTTStream(payload) {
     if (config.get('amazon.enabled')) {
         createNewAmazonStream(payload, audioDataStream);
     }
+    if (config.get('file.enabled')) {
+        createNewFileStream(payload, audioDataStream);
+    }
+    if (config.get('wss.enabled')) {
+        createNewWebSocketStream(payload, audioDataStream);
+    }
+}
+
+async function createNewFileStream(payload,audioDataStream) {
+    log.info({ payload }, 'New Stream of audio from Asterisk to save to file');
+
+    let file = new FileConnector(payload.channelId, log);
+
+    let map = connectorsMap.get(payload.channelId);
+    map.set('file', file);
+    connectorsMap.set(payload.channelId, map);
+
+    file.start(audioDataStream);
+}
+
+async function createNewWebSocketStream(payload,audioDataStream) {
+    log.info({ payload }, 'New Stream of audio from Asterisk to send to WebSocket');
+
+    let websocketConnector = new WebSocketConnector(audioConfig, payload.channelId, log);
+
+    let map = connectorsMap.get(payload.channelId);
+    map.set('wss', websocketConnector);
+    connectorsMap.set(payload.channelId, map);
+
+    websocketConnector.start(audioDataStream);
 }
 
 async function createNewAzureStream(payload,audioDataStream) {
@@ -203,7 +235,7 @@ async function run() {
     });
 
     rtpServer.bind();
-    log.info('AudioServer listening on UDP port');
+    log.info(`AudioServer listening on UDP port ${config.get('rtpServer.port')}`);
 }
 
 run();
