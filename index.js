@@ -1,10 +1,10 @@
+const cloneable = require('cloneable-readable')
 const RtpServer = require('./lib/RTPServer');
 const config = require('config');
 const mqtt = require('async-mqtt');
+const { WebSocket } = require('ws');
 const Pino = require('pino');
-const GoogleCloudConnector = require('./lib/GoogleCloudConnector');
 const AzureSpeechConnector = require('./lib/AzureSpeechConnector');
-const AmazonTranscribeConnector = require('./lib/AmazonTranscribeConnector');
 const FileConnector = require('./lib/FileConnector');
 const WebSocketConnector = require('./lib/WebSocketConnector');
 const log = new Pino({
@@ -21,34 +21,39 @@ log.info('started');
 
 async function createNewSTTStream(payload) {
 
-    let audioDataStream = rtpServer.createStream(payload.port);
-    connectorsMap.set(payload.channelId, new Map());
+    let audioDataStream = cloneable(rtpServer.createStream(payload.port));
+    connectorsMap.set(payload.streamId, new Map());
+    let targetStreams = 0;
+    if (config.get('azure.enabled')) targetStreams++;
+    if (config.get('file.enabled')) targetStreams++;
+    if (config.get('wss.enabled')) targetStreams++;
+    const streams = [
+        audioDataStream
+    ];
 
-    if (config.get('google.enabled')) {
-        createNewGoogleStream(payload, audioDataStream);
+    for (let i = 0; i < (targetStreams - 1); i++) {
+        streams.push(audioDataStream.clone());
     }
+    
     if (config.get('azure.enabled')) {
-        createNewAzureStream(payload, audioDataStream);
-    }
-    if (config.get('amazon.enabled')) {
-        createNewAmazonStream(payload, audioDataStream);
+        createNewAzureStream(payload, streams.pop());
     }
     if (config.get('file.enabled')) {
-        createNewFileStream(payload, audioDataStream);
+        createNewFileStream(payload, streams.pop());
     }
     if (config.get('wss.enabled')) {
-        createNewWebSocketStream(payload, audioDataStream);
+        createNewWebSocketStream(payload, streams.pop());
     }
 }
 
 async function createNewFileStream(payload,audioDataStream) {
     log.info({ payload }, 'New Stream of audio from Asterisk to save to file');
 
-    let fileConnector = new FileConnector(payload.roomName, log);
+    let fileConnector = new FileConnector(payload.streamId, log);
 
-    let map = connectorsMap.get(payload.channelId);
+    let map = connectorsMap.get(payload.streamId);
     map.set('file', fileConnector);
-    connectorsMap.set(payload.channelId, map);
+    connectorsMap.set(payload.streamId, map);
 
     fileConnector.start(audioDataStream);
 }
@@ -56,11 +61,11 @@ async function createNewFileStream(payload,audioDataStream) {
 async function createNewWebSocketStream(payload,audioDataStream) {
     log.info({ payload }, 'New Stream of audio from Asterisk to send to WebSocket');
 
-    let websocketConnector = new WebSocketConnector(audioConfig, payload.roomName, log);
+    let websocketConnector = new WebSocketConnector(payload.streamId, log, getOptsFromPayload(payload));
 
-    let map = connectorsMap.get(payload.channelId);
+    let map = connectorsMap.get(payload.streamId);
     map.set('wss', websocketConnector);
-    connectorsMap.set(payload.channelId, map);
+    connectorsMap.set(payload.streamId, map);
 
     websocketConnector.start(audioDataStream);
 }
@@ -68,125 +73,40 @@ async function createNewWebSocketStream(payload,audioDataStream) {
 async function createNewAzureStream(payload,audioDataStream) {
     log.info({ payload }, 'New Stream of audio from Asterisk to send to Azure');
 
-    const languageCode = 'en-GB';
+    const languageCode = 'en-US';
 
     const audioConfig = {
         languageCode
     }
 
-    let azureSpeechConnector = new AzureSpeechConnector(audioConfig, payload.channelId, log);
+    let azureSpeechConnector = new AzureSpeechConnector(audioConfig, payload.streamId, log, getOptsFromPayload(payload));
 
-    let map = connectorsMap.get(payload.channelId);
+    let map = connectorsMap.get(payload.streamId);
     map.set('azure', azureSpeechConnector);
-    connectorsMap.set(payload.channelId, map);
+    connectorsMap.set(payload.streamId, map);
 
     azureSpeechConnector.start(audioDataStream);
 
     azureSpeechConnector.on('message', async (data) => {
-        log.info(`Got a message sending to ${mqttTopicPrefix}/${payload.roomName}/transcription`);
-        await mqttClient.publish(`${mqttTopicPrefix}/${payload.roomName}/transcription`, JSON.stringify({ ...data, callerName: payload.callerName }));
+        // log.info(`Got a message sending to ${mqttTopicPrefix}/${payload.streamId}/transcription`);
+        // await mqttClient.publish(`${mqttTopicPrefix}/${payload.streamId}/transcription`, JSON.stringify({ ...data, callerName: payload.callerName }));
+        
     });
 }
 
-async function createNewAmazonStream(payload, audioDataStream) {
-
-    log.info({ payload }, 'New Stream of audio from Asterisk to send to Amazon');
-
-    // these are set here so that we can overwrite them from Asterisk
-    const encoding = 'pcm';
-    const sampleRateHertz = 16000;
-    const languageCode = 'en-US';
-
-    const audioConfig = {
-        encoding,
-        sampleRateHertz,
-        languageCode,
+function getOptsFromPayload(payload) {
+    return {
+        name: payload.callerName,
+        userId: payload.streamType == 'in' ? '1003' : '1001',
+        userType: payload.streamType == 'in' ? 'Patient' : 'Doctor',
+        sessionId: payload.roomName,
     };
-
-    let amazonTranscribeConnector = new AmazonTranscribeConnector(audioConfig, payload.channelId, log);
-
-    let map = connectorsMap.get(payload.channelId);
-    map.set('amazon', amazonTranscribeConnector);
-    connectorsMap.set(payload.channelId, map);
-
-    amazonTranscribeConnector.start(audioDataStream);
-
-    amazonTranscribeConnector.on('message', async (data) => {
-        log.info(`Got a message sending to ${mqttTopicPrefix}/${payload.roomName}/transcription`);
-        await mqttClient.publish(`${mqttTopicPrefix}/${payload.roomName}/transcription`, JSON.stringify({ ...data, callerName: payload.callerName }));
-    });
-}
-
-async function createNewGoogleStream(payload, audioDataStream) {
-
-    log.info({ payload }, 'New Stream of audio from Asterisk to send to Google');
-
-    // these are set here so that we can overwrite them from Asterisk
-    const encoding = 'LINEAR16';
-    const sampleRateHertz = 16000;
-    const languageCode = 'en-GB'; // https://cloud.google.com/speech-to-text/docs/languages
-    //const alternativeLanguageCodes = ['en-US']; //not available for this model
-    const audioChannelCount = 1;
-    const enableSeparateRecognitionPerChannel = false; //if asterisk was able to send us multiple channels, one per speaker that would be amazing, we could even make a multi channel audio stream here to save on cost?
-    const maxAlternatives = 1;
-    const model = 'phone_call'; //phone_call', 'video', 'default'
-    const useEnhanced = true;
-    const profanityFilter = false;
-    const enableAutomaticPunctuation = true;
-    const enableWordTimeOffsets = true;
-    const enableWordConfidence = true;
-    const metadata = {
-        interactionType: 'PHONE_CALL',
-        microphoneDistance: 'NEARFIELD',
-        originalMediaType: 'AUDIO',
-        recordingDeviceType: 'PC',
-        recordingDeviceName: 'WebRTC',
-    };
-
-    // you may only want to have one stream from each conference so you'd need to add diarizationConfig into the config object
-    // const diarizationConfig = {
-    //     enableSpeakerDiarization: true,
-    //     minSpeakerCount: 2,
-    //     maxSpeakerCount: 10
-    // };
-
-    const streamingLimit = 290000;
-
-    const audioConfig = {
-        encoding,
-        sampleRateHertz,
-        languageCode,
-        //alternativeLanguageCodes,
-        audioChannelCount,
-        enableSeparateRecognitionPerChannel,
-        maxAlternatives,
-        model,
-        useEnhanced,
-        profanityFilter,
-        enableAutomaticPunctuation,
-        enableWordTimeOffsets,
-        enableWordConfidence,
-        metadata
-    };
-
-    let googleStreamConnector = new GoogleCloudConnector(audioConfig, streamingLimit, payload.channelId, log);
-
-    let map = connectorsMap.get(payload.channelId);
-    map.set('google', googleStreamConnector);
-    connectorsMap.set(payload.channelId, map);
-
-    googleStreamConnector.start(audioDataStream);
-
-    googleStreamConnector.on('message', async (data) => {
-        log.info(`Got a message sending to ${mqttTopicPrefix}/${payload.roomName}/transcription`);
-        await mqttClient.publish(`${mqttTopicPrefix}/${payload.roomName}/transcription`, JSON.stringify({ ...data, callerName: payload.callerName }));
-    });
 }
 
 function stopSTTStream(payload) {
     log.info({ payload }, 'Ending stream of audio from Asterisk to send to Google');
 
-    let connectors = connectorsMap.get(payload.channelId);
+    let connectors = connectorsMap.get(payload.streamId);
 
     if (connectors) {
         //loop through the providers
@@ -194,7 +114,7 @@ function stopSTTStream(payload) {
             connector.end();
             connectors.delete(key);
         })
-        connectorsMap.delete(payload.channelId);
+        connectorsMap.delete(payload.streamId);
     }
 
     rtpServer.endStream(payload.port);
