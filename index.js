@@ -160,7 +160,7 @@ async function createNewWebSocketStream(payload,audioDataStream) {
 async function createNewAzureStream(payload,audioDataStream) {
     log.info({ payload }, 'New Stream of audio from Asterisk to send to Azure');
 
-    const languageCode = 'en-US';
+    const languageCode = 'en-IN';
 
     const audioConfig = {
         languageCode
