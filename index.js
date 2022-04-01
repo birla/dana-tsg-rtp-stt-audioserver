@@ -19,6 +19,75 @@ let mqttClient;
 
 log.info('started');
 
+/**
+ * FOR LOCAL TESTING ONLY
+ * @param {*} payload 
+ */
+async function createNewSTTStreamFromFile(payload) {
+    var fs = require('fs');
+    var wav = require('wav');
+
+    var file = fs.createReadStream('../recordings/1646390966.24-in.wav');
+    var reader = new wav.Reader();
+
+    // the "format" event gets emitted at the end of the WAVE header
+    reader.on('format', function (format) {
+        // the WAVE header is stripped from the output of the reader
+    
+        let audioDataStream = cloneable(reader);
+        // let audioDataStream = cloneable(rtpServer.createStream(payload.port));
+        connectorsMap.set(payload.streamId, new Map());
+        let targetStreams = 0;
+        if (config.get('azure.enabled')) targetStreams++;
+        if (config.get('file.enabled')) targetStreams++;
+        if (config.get('wss.enabled')) targetStreams++;
+        const streams = [
+            audioDataStream
+        ];
+
+        for (let i = 0; i < (targetStreams - 1); i++) {
+            streams.push(audioDataStream.clone());
+        }
+        
+        if (config.get('azure.enabled')) {
+            createNewAzureStream(payload, streams.pop());
+        }
+        if (config.get('file.enabled')) {
+            createNewFileStream(payload, streams.pop());
+        }
+        if (config.get('wss.enabled')) {
+            createNewWebSocketStream(payload, streams.pop());
+        }
+    });
+
+    // pipe the WAVE file to the Reader instance
+    file.pipe(reader);
+}
+
+async function jsonToWav() {
+    let fileName = 'audio_transcript-6'
+    var inpJson = require(`../python-test/${fileName}.json`);
+    const Readable = require('stream').Readable;
+    const path = require('path');
+    const wav = require('wav');
+    const s = new Readable();
+    s._read = () => {};
+    const wavWriter = new wav.FileWriter(path.join('../python-test/', `${fileName}.wav`), {
+        sampleRate: config.get('file.sampleRate'),
+        channels: config.get('file.channels'),
+        signed: true,
+        // endianness: 'LE',
+        format: 1,
+    });
+    s.pipe(wavWriter).on('finish', function () {  // finished
+        console.log('done');
+    });
+    for(let k in inpJson) {
+        s.push(new Buffer.from(inpJson[k], 'base64'))
+    }
+    s.push(null);
+}
+
 async function createNewSTTStream(payload) {
 
     let audioDataStream = cloneable(rtpServer.createStream(payload.port));
@@ -30,6 +99,16 @@ async function createNewSTTStream(payload) {
     const streams = [
         audioDataStream
     ];
+
+    // when the stream closes, stop all connectors as well
+    audioDataStream.on('close', () => {
+        try {
+            stopSTTStream(payload);
+        } catch (error) {
+            log.error({ payload, error }, 'Failed to stopSTTStream');
+            throw error;
+        }
+    });
 
     for (let i = 0; i < (targetStreams - 1); i++) {
         streams.push(audioDataStream.clone());
@@ -56,6 +135,10 @@ async function createNewFileStream(payload,audioDataStream) {
     connectorsMap.set(payload.streamId, map);
 
     fileConnector.start(audioDataStream);
+    fileConnector.on('end', () => {
+        let connectors = connectorsMap.get(payload.streamId);
+        connectors.delete('file');
+    });
 }
 
 async function createNewWebSocketStream(payload,audioDataStream) {
@@ -68,6 +151,10 @@ async function createNewWebSocketStream(payload,audioDataStream) {
     connectorsMap.set(payload.streamId, map);
 
     websocketConnector.start(audioDataStream);
+    websocketConnector.on('end', () => {
+        let connectors = connectorsMap.get(payload.streamId);
+        connectors.delete('wss');
+    });
 }
 
 async function createNewAzureStream(payload,audioDataStream) {
@@ -90,7 +177,11 @@ async function createNewAzureStream(payload,audioDataStream) {
     azureSpeechConnector.on('message', async (data) => {
         // log.info(`Got a message sending to ${mqttTopicPrefix}/${payload.streamId}/transcription`);
         // await mqttClient.publish(`${mqttTopicPrefix}/${payload.streamId}/transcription`, JSON.stringify({ ...data, callerName: payload.callerName }));
-        
+
+    });
+    azureSpeechConnector.on('end', () => {
+        let connectors = connectorsMap.get(payload.streamId);
+        connectors.delete('azure');
     });
 }
 
@@ -104,7 +195,7 @@ function getOptsFromPayload(payload) {
 }
 
 function stopSTTStream(payload) {
-    log.info({ payload }, 'Ending stream of audio from Asterisk to send to Google');
+    log.info({ payload }, 'Ending stream of audio from Asterisk to send to Azure');
 
     let connectors = connectorsMap.get(payload.streamId);
 
@@ -155,6 +246,19 @@ async function run() {
     });
 
     rtpServer.bind();
+
+    // local testing code
+    setTimeout(() => {
+        // jsonToWav()
+        // createNewSTTStreamFromFile({
+        //     roomName:'12345',
+        //     streamId: '345thrge356',
+        //     streamType:'in',
+        //     callerName:'test',
+        //     channelId: '345thrge356',
+        //     port: 55555,
+        // });
+    }, 500);
     log.info(`AudioServer listening on UDP port ${config.get('rtpServer.port')}`);
 }
 
